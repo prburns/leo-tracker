@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LEO Satellite Tracker</title>
+
+  <!-- Cesium -->
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.122/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.122/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+
+  <!-- satellite.js (SGP4 propagation) -->
+  <script src="https://unpkg.com/satellite.js@5.0.0/dist/satellite.min.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app-layout">
+    <!-- Sidebar -->
+    <div id="sidebar">
+      <div id="sidebar-header">
+        <div id="sidebar-title">🛰️ LEO Tracker</div>
+        <div id="sidebar-stats">Loading TLEs...</div>
+      </div>
+
+      <!-- Plane selector -->
+      <div id="plane-selector">
+        <div class="section-label">Satellite Planes</div>
+        <div id="plane-buttons"></div>
+        <div id="custom-ids-row">
+          <input
+            type="text"
+            id="noradInput"
+            placeholder="Custom NORAD IDs (e.g. 25544,20580)"
+          />
+          <button id="fetchBtn">Fetch</button>
+        </div>
+      </div>
+
+      <!-- Orbit trace toggle -->
+      <div id="trace-controls">
+        <label class="toggle-row">
+          <input type="checkbox" id="showOrbits" />
+          <span>Show orbit traces</span>
+        </label>
+      </div>
+
+      <!-- Satellite table -->
+      <div id="table-container">
+        <table id="sat-table">
+          <thead>
+            <tr>
+              <th data-sort="name" class="sortable active-sort">Name <span class="sort-arrow">▲</span></th>
+              <th data-sort="noradId" class="sortable">NORAD <span class="sort-arrow"></span></th>
+              <th data-sort="alt" class="sortable">Alt (km) <span class="sort-arrow"></span></th>
+              <th data-sort="vel" class="sortable">Vel (km/s) <span class="sort-arrow"></span></th>
+            </tr>
+          </thead>
+          <tbody id="sat-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Cesium globe -->
+    <div id="cesiumContainer"></div>
+  </div>
+
+  <!-- Info box for clicked satellite -->
+  <div id="infoBox" class="hidden">
+    <div id="infoTitle"></div>
+    <div id="infoDetails"></div>
+    <button id="infoClose">&times;</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
