@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // LEO Satellite Tracker — app.js
-// Orbit traces · Sortable sidebar · Configurable satellite planes
+// Orbit traces · Sortable sidebar · Analytics · Conjunctions
 // ---------------------------------------------------------------------------
 
 let viewer;
@@ -9,14 +9,19 @@ let tleRefreshTimer;
 let activePlanes = new Set();
 
 const TLE_REFRESH_MS = 30 * 60 * 1000;
-const ORBIT_SAMPLE_POINTS = 120; // points per orbit trace
+const ORBIT_SAMPLE_POINTS = 120;
 
 // Sort state
 let sortKey = "name";
 let sortAsc = true;
 
+// Analytics state
+let altitudeChart = null;
+let selectedSatForHistory = null;
+let conjunctionRefreshTimer;
+
 // ---------------------------------------------------------------------------
-// Satellite planes — add more planes here as needed
+// Satellite planes
 // ---------------------------------------------------------------------------
 
 const SATELLITE_PLANES = {
@@ -32,7 +37,6 @@ const SATELLITE_PLANES = {
   },
 };
 
-// Cesium color instances (built at init)
 const planeColors = {};
 
 // ---------------------------------------------------------------------------
@@ -61,28 +65,28 @@ async function init() {
     destination: Cesium.Cartesian3.fromDegrees(-77.0, 38.9, 12_000_000),
   });
 
-  // Build Cesium colors for each plane
   for (const [planeName, plane] of Object.entries(SATELLITE_PLANES)) {
     planeColors[planeName] = Cesium.Color.fromCssColorString(plane.color);
   }
 
-  // Build plane toggle buttons
   buildPlaneButtons();
 
-  // Click handler
   const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
   handler.setInputAction(onLeftClick, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-  // UI wiring
   document.getElementById("fetchBtn").addEventListener("click", onFetchClick);
   document.getElementById("infoClose").addEventListener("click", () => {
     document.getElementById("infoBox").classList.add("hidden");
   });
   document.getElementById("showOrbits").addEventListener("change", onToggleOrbits);
 
-  // Table sorting
   document.querySelectorAll("#sat-table th.sortable").forEach((th) => {
     th.addEventListener("click", () => onSortClick(th));
+  });
+
+  // Tab switching
+  document.querySelectorAll(".sidebar-tab").forEach((tab) => {
+    tab.addEventListener("click", () => switchTab(tab.dataset.tab));
   });
 
   // Load the first plane by default
@@ -93,14 +97,33 @@ async function init() {
     await loadActivePlanes();
   }
 
-  // Real-time propagation loop
   viewer.clock.onTick.addEventListener(updatePositions);
 
-  // Auto-refresh TLEs
   tleRefreshTimer = setInterval(() => {
     console.log("[Auto-refresh] Fetching new TLEs...");
     loadActivePlanes();
   }, TLE_REFRESH_MS);
+
+  // Load conjunctions
+  loadConjunctions();
+  conjunctionRefreshTimer = setInterval(loadConjunctions, 5 * 60 * 1000);
+}
+
+// ---------------------------------------------------------------------------
+// Tab switching
+// ---------------------------------------------------------------------------
+
+function switchTab(tabName) {
+  document.querySelectorAll(".sidebar-tab").forEach((t) => {
+    t.classList.toggle("active", t.dataset.tab === tabName);
+  });
+  document.querySelectorAll(".tab-content").forEach((c) => {
+    c.classList.toggle("active", c.id === `tab-${tabName}`);
+  });
+
+  if (tabName === "analytics") {
+    updateSpacingVis();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +208,6 @@ async function loadTLEs(noradIdString) {
     const json = await res.json();
     const tleData = json.satellites;
 
-    // Clear existing
     clearAllSatellites();
 
     const showOrbits = document.getElementById("showOrbits").checked;
@@ -199,7 +221,6 @@ async function loadTLEs(noradIdString) {
           ? planeColors[planeName]
           : Cesium.Color.WHITE.withAlpha(0.8);
 
-        // Satellite point entity
         const entity = viewer.entities.add({
           name: name,
           position: Cesium.Cartesian3.fromDegrees(0, 0, 0),
@@ -224,7 +245,6 @@ async function loadTLEs(noradIdString) {
           },
         });
 
-        // Orbit trace entity
         const orbitEntity = createOrbitTrace(satrec, color, showOrbits);
 
         satellites.push({
@@ -249,6 +269,7 @@ async function loadTLEs(noradIdString) {
 
     updateStats(satellites.length, json.cachedAt, json.source);
     renderTable();
+    updateSpacingVis();
 
   } catch (err) {
     console.error("[TLE fetch error]", err);
@@ -280,8 +301,7 @@ function updateStats(count, cachedAt, source) {
 // ---------------------------------------------------------------------------
 
 function createOrbitTrace(satrec, color, visible) {
-  // Compute orbital period from mean motion (rev/day → minutes)
-  const meanMotionRevPerDay = satrec.no * (1440 / (2 * Math.PI)); // rev/day
+  const meanMotionRevPerDay = satrec.no * (1440 / (2 * Math.PI));
   const periodMin = 1440 / meanMotionRevPerDay;
   const periodMs = periodMin * 60 * 1000;
 
@@ -368,7 +388,6 @@ function updatePositions() {
       : 0;
   }
 
-  // Update table values every 30 ticks (~0.5s) to avoid DOM thrashing
   if (tickCounter % 30 === 0) {
     updateTableValues();
   }
@@ -455,7 +474,6 @@ function onSortClick(th) {
     sortAsc = true;
   }
 
-  // Update header UI
   document.querySelectorAll("#sat-table th.sortable").forEach((h) => {
     h.classList.remove("active-sort");
     h.querySelector(".sort-arrow").textContent = "";
@@ -467,16 +485,14 @@ function onSortClick(th) {
 }
 
 // ---------------------------------------------------------------------------
-// Fly to satellite on table row click
+// Fly to satellite + load history
 // ---------------------------------------------------------------------------
 
 function flyToSatellite(sat) {
-  // Highlight selected row
   document.querySelectorAll("#sat-tbody tr").forEach((r) => r.classList.remove("selected"));
   const row = document.querySelector(`#sat-tbody tr[data-norad-id="${sat.noradId}"]`);
   if (row) row.classList.add("selected");
 
-  // Camera fly-to slightly offset above and behind
   const pos = Cesium.Cartesian3.fromDegrees(
     sat.currentLon,
     sat.currentLat,
@@ -488,8 +504,8 @@ function flyToSatellite(sat) {
     duration: 1.5,
   });
 
-  // Show info box
   showInfoBox(sat);
+  loadAltitudeHistory(sat);
 }
 
 // ---------------------------------------------------------------------------
@@ -510,8 +526,8 @@ function onLeftClick(click) {
   if (!sat) return;
 
   showInfoBox(sat);
+  loadAltitudeHistory(sat);
 
-  // Also highlight in table
   document.querySelectorAll("#sat-tbody tr").forEach((r) => r.classList.remove("selected"));
   const row = document.querySelector(`#sat-tbody tr[data-norad-id="${sat.noradId}"]`);
   if (row) {
@@ -547,6 +563,378 @@ function showInfoBox(sat) {
 }
 
 // ---------------------------------------------------------------------------
+// Altitude History & Maneuver Detection
+// ---------------------------------------------------------------------------
+
+async function loadAltitudeHistory(sat) {
+  selectedSatForHistory = sat;
+
+  const hintEl = document.getElementById("altitude-hint");
+  const chartContainer = document.getElementById("altitude-chart-container");
+  const maneuverList = document.getElementById("maneuver-list");
+
+  hintEl.textContent = `Loading history for ${sat.name}...`;
+  hintEl.classList.remove("hidden");
+  chartContainer.classList.add("hidden");
+  maneuverList.innerHTML = "";
+
+  try {
+    const res = await fetch(`/api/tle-history?id=${sat.noradId}&days=90`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    const history = json.history;
+
+    if (!history || history.length === 0) {
+      hintEl.textContent = `No historical data for ${sat.name}`;
+      return;
+    }
+
+    // Detect maneuvers (altitude change > 1 km between consecutive TLEs within 2 days)
+    const maneuvers = [];
+    for (let i = 1; i < history.length; i++) {
+      const prev = history[i - 1];
+      const curr = history[i];
+      const deltaAlt = curr.altitude - prev.altitude;
+      const dtDays = (new Date(curr.epoch) - new Date(prev.epoch)) / (1000 * 86400);
+
+      if (Math.abs(deltaAlt) > 1.0 && dtDays < 2) {
+        maneuvers.push({
+          epoch: curr.epoch,
+          deltaAlt,
+          fromAlt: prev.altitude,
+          toAlt: curr.altitude,
+        });
+      }
+    }
+
+    // Render chart
+    renderAltitudeChart(history, maneuvers, sat);
+
+    hintEl.classList.add("hidden");
+    chartContainer.classList.remove("hidden");
+
+    // Render maneuver list
+    if (maneuvers.length > 0) {
+      maneuverList.innerHTML = `<div class="section-label" style="margin-top:4px;">Detected Maneuvers</div>` +
+        maneuvers.map((m) => `
+          <div class="maneuver-item">
+            ${m.deltaAlt > 0 ? "▲" : "▼"} ${Math.abs(m.deltaAlt).toFixed(2)} km
+            (${m.fromAlt.toFixed(1)} → ${m.toAlt.toFixed(1)} km)
+            <div class="maneuver-date">${new Date(m.epoch).toLocaleDateString()} ${new Date(m.epoch).toLocaleTimeString()}</div>
+          </div>
+        `).join("");
+    } else {
+      maneuverList.innerHTML = `<div style="font-size:11px;color:#6b7280;margin-top:4px;">No maneuvers detected in 90-day window</div>`;
+    }
+
+  } catch (err) {
+    console.error("[History]", err);
+    hintEl.textContent = `Error loading history: ${err.message}`;
+  }
+}
+
+function renderAltitudeChart(history, maneuvers, sat) {
+  const ctx = document.getElementById("altitudeChart").getContext("2d");
+
+  if (altitudeChart) {
+    altitudeChart.destroy();
+  }
+
+  const labels = history.map((h) => h.epoch);
+  const data = history.map((h) => h.altitude);
+
+  // Mark maneuver points
+  const maneuverEpochs = new Set(maneuvers.map((m) => m.epoch));
+  const pointColors = history.map((h) =>
+    maneuverEpochs.has(h.epoch) ? "#ef4444" : "transparent"
+  );
+  const pointRadii = history.map((h) =>
+    maneuverEpochs.has(h.epoch) ? 5 : 0
+  );
+
+  const planeColor = sat.planeName ? SATELLITE_PLANES[sat.planeName]?.color : "#93c5fd";
+
+  altitudeChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: `${sat.name} Altitude (km)`,
+        data,
+        borderColor: planeColor || "#93c5fd",
+        backgroundColor: (planeColor || "#93c5fd") + "20",
+        borderWidth: 1.5,
+        fill: true,
+        tension: 0.1,
+        pointBackgroundColor: pointColors,
+        pointRadius: pointRadii,
+        pointHoverRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => {
+              const d = new Date(items[0].label);
+              return d.toLocaleDateString() + " " + d.toLocaleTimeString();
+            },
+            label: (item) => `${item.parsed.y.toFixed(2)} km`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          display: true,
+          ticks: {
+            maxTicksLimit: 6,
+            color: "#6b7280",
+            font: { size: 10 },
+            callback: function (val, idx) {
+              const d = new Date(this.getLabelForValue(val));
+              return `${d.getMonth() + 1}/${d.getDate()}`;
+            },
+          },
+          grid: { color: "rgba(255,255,255,0.04)" },
+        },
+        y: {
+          ticks: { color: "#6b7280", font: { size: 10 } },
+          grid: { color: "rgba(255,255,255,0.04)" },
+        },
+      },
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Inter-satellite Spacing
+// ---------------------------------------------------------------------------
+
+function computeArgOfLatitude(sat) {
+  const now = new Date();
+  const pv = satellite.propagate(sat.satrec, now);
+  if (!pv.position || typeof pv.position === "boolean") return null;
+
+  const r = pv.position;
+  const Omega = sat.satrec.nodeo; // RAAN (rad)
+  const inc = sat.satrec.inclo;   // inclination (rad)
+
+  // Rotate by -RAAN around Z axis
+  const cosO = Math.cos(Omega);
+  const sinO = Math.sin(Omega);
+  const xN = r.x * cosO + r.y * sinO;
+  const yN = -r.x * sinO + r.y * cosO;
+  const zN = r.z;
+
+  // Rotate by -inclination around X axis
+  const cosI = Math.cos(inc);
+  const sinI = Math.sin(inc);
+  const xP = xN;
+  const yP = yN * cosI + zN * sinI;
+
+  // Argument of latitude
+  let u = Math.atan2(yP, xP) * 180 / Math.PI;
+  return ((u % 360) + 360) % 360;
+}
+
+function updateSpacingVis() {
+  const canvas = document.getElementById("spacingCanvas");
+  const statsEl = document.getElementById("spacing-stats");
+
+  if (satellites.length === 0) {
+    statsEl.innerHTML = `<div class="analytics-hint">Load satellites to see spacing</div>`;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+
+  // Group satellites by plane and compute argument of latitude
+  const planeData = {};
+  for (const [planeName, planeInfo] of Object.entries(SATELLITE_PLANES)) {
+    const planeSats = satellites
+      .filter((s) => s.planeName === planeName)
+      .map((s) => {
+        const u = computeArgOfLatitude(s);
+        return u !== null ? { noradId: s.noradId, name: s.name, u, color: planeInfo.color } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.u - b.u);
+
+    if (planeSats.length > 0) {
+      planeData[planeName] = planeSats;
+    }
+  }
+
+  // Draw polar chart
+  drawSpacingPolar(canvas, planeData);
+
+  // Build spacing stats
+  let html = "";
+  for (const [planeName, sats] of Object.entries(planeData)) {
+    const gaps = [];
+    for (let i = 0; i < sats.length; i++) {
+      const next = (i + 1) % sats.length;
+      let gap = sats[next].u - sats[i].u;
+      if (gap <= 0) gap += 360;
+      gaps.push({ from: sats[i], to: sats[next], gap });
+    }
+
+    const idealGap = 360 / sats.length;
+    const maxGap = Math.max(...gaps.map((g) => g.gap));
+    const minGap = Math.min(...gaps.map((g) => g.gap));
+    const color = SATELLITE_PLANES[planeName].color;
+
+    html += `
+      <div class="spacing-plane">
+        <div class="spacing-plane-title" style="color:${color}">${planeName} (${sats.length} sats)</div>
+        <div style="font-size:11px; color:#9ca3af;">
+          Ideal: ${idealGap.toFixed(1)}° · Min: ${minGap.toFixed(1)}° · Max: ${maxGap.toFixed(1)}°
+        </div>
+        ${gaps.map((g) => {
+          const deviation = Math.abs(g.gap - idealGap);
+          const barWidth = Math.max(2, (g.gap / maxGap) * 100);
+          const barColor = deviation > idealGap * 0.3 ? "#ef4444" : color;
+          return `
+            <div class="spacing-bar-row">
+              <span class="spacing-value">${g.gap.toFixed(1)}°</span>
+              <div class="spacing-bar" style="width:${barWidth}%;background:${barColor}"></div>
+            </div>`;
+        }).join("")}
+      </div>`;
+  }
+
+  statsEl.innerHTML = html;
+}
+
+function drawSpacingPolar(canvas, planeData) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  const cx = w / 2;
+  const cy = h / 2;
+  const radius = Math.min(cx, cy) - 30;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Draw background circles
+  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  ctx.lineWidth = 1;
+  for (let r = radius * 0.33; r <= radius; r += radius * 0.33) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+
+  // Draw crosshairs
+  ctx.beginPath();
+  ctx.moveTo(cx - radius, cy);
+  ctx.lineTo(cx + radius, cy);
+  ctx.moveTo(cx, cy - radius);
+  ctx.lineTo(cx, cy + radius);
+  ctx.stroke();
+
+  // Draw angle labels
+  ctx.fillStyle = "#4b5563";
+  ctx.font = "10px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("0°", cx + radius + 14, cy + 4);
+  ctx.fillText("90°", cx, cy - radius - 6);
+  ctx.fillText("180°", cx - radius - 16, cy + 4);
+  ctx.fillText("270°", cx, cy + radius + 14);
+
+  // Draw satellites for each plane at different radii
+  const planeNames = Object.keys(planeData);
+  planeNames.forEach((planeName, planeIdx) => {
+    const sats = planeData[planeName];
+    const color = SATELLITE_PLANES[planeName].color;
+    const r = radius * (0.7 + planeIdx * 0.25);
+
+    // Draw connecting arcs
+    ctx.strokeStyle = color + "40";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+    ctx.stroke();
+
+    // Draw satellite dots
+    for (const sat of sats) {
+      const angle = (sat.u - 90) * Math.PI / 180; // -90 to put 0° at top
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, 2 * Math.PI);
+      ctx.fill();
+
+      // Label
+      ctx.fillStyle = "#9ca3af";
+      ctx.font = "8px sans-serif";
+      ctx.textAlign = "center";
+      const lx = cx + (r + 14) * Math.cos(angle);
+      const ly = cy + (r + 14) * Math.sin(angle);
+      ctx.fillText(sat.noradId, lx, ly + 3);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Conjunction Alerts
+// ---------------------------------------------------------------------------
+
+async function loadConjunctions() {
+  const statusEl = document.getElementById("conj-status");
+  const listEl = document.getElementById("conj-list");
+
+  try {
+    const res = await fetch("/api/conjunctions");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+
+    document.getElementById("conj-threshold").textContent = json.thresholdKm;
+
+    if (!json.screenedAt) {
+      statusEl.textContent = "Screening not yet complete. Check back shortly...";
+      listEl.innerHTML = "";
+      return;
+    }
+
+    const screenedTime = new Date(json.screenedAt).toLocaleTimeString();
+    statusEl.textContent = `Last screened: ${screenedTime} · ${json.conjunctions.length} alert(s)`;
+
+    if (json.conjunctions.length === 0) {
+      listEl.innerHTML = `<div class="conj-none">No close approaches detected in the next ${json.lookaheadHours}h</div>`;
+      return;
+    }
+
+    listEl.innerHTML = json.conjunctions.map((c) => {
+      const severity = c.minDistance < 5 ? "" : " warning";
+      const tca = new Date(c.tca);
+      const hoursFromNow = ((tca - Date.now()) / 3600000).toFixed(1);
+
+      return `
+        <div class="conj-item${severity}">
+          <div class="conj-distance">${c.minDistance.toFixed(2)} km</div>
+          <div class="conj-sats">
+            ${c.sat1.name} (${c.sat1.plane}) &harr; ${c.sat2.name} (${c.sat2.plane})
+          </div>
+          <div class="conj-time">
+            TCA: ${tca.toUTCString()}<br/>
+            In ${hoursFromNow}h from now
+          </div>
+        </div>`;
+    }).join("");
+
+  } catch (err) {
+    console.error("[Conjunctions]", err);
+    statusEl.textContent = `Error: ${err.message}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Custom NORAD ID fetch
 // ---------------------------------------------------------------------------
 
@@ -554,7 +942,6 @@ function onFetchClick() {
   const input = document.getElementById("noradInput").value.trim();
   if (!input) return;
 
-  // Deselect all planes (this is a custom query)
   activePlanes.clear();
   updatePlaneButtonStates();
 

@@ -12,6 +12,9 @@
   <!-- satellite.js (SGP4 propagation) -->
   <script src="https://unpkg.com/satellite.js@5.0.0/dist/satellite.min.js"></script>
 
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -45,19 +48,58 @@
         </label>
       </div>
 
-      <!-- Satellite table -->
-      <div id="table-container">
-        <table id="sat-table">
-          <thead>
-            <tr>
-              <th data-sort="name" class="sortable active-sort">Name <span class="sort-arrow">▲</span></th>
-              <th data-sort="noradId" class="sortable">NORAD <span class="sort-arrow"></span></th>
-              <th data-sort="alt" class="sortable">Alt (km) <span class="sort-arrow"></span></th>
-              <th data-sort="vel" class="sortable">Vel (km/s) <span class="sort-arrow"></span></th>
-            </tr>
-          </thead>
-          <tbody id="sat-tbody"></tbody>
-        </table>
+      <!-- Tabs -->
+      <div id="sidebar-tabs">
+        <button class="sidebar-tab active" data-tab="satellites">Satellites</button>
+        <button class="sidebar-tab" data-tab="analytics">Analytics</button>
+      </div>
+
+      <!-- Tab: Satellites (existing table) -->
+      <div id="tab-satellites" class="tab-content active">
+        <div id="table-container">
+          <table id="sat-table">
+            <thead>
+              <tr>
+                <th data-sort="name" class="sortable active-sort">Name <span class="sort-arrow">▲</span></th>
+                <th data-sort="noradId" class="sortable">NORAD <span class="sort-arrow"></span></th>
+                <th data-sort="alt" class="sortable">Alt (km) <span class="sort-arrow"></span></th>
+                <th data-sort="vel" class="sortable">Vel (km/s) <span class="sort-arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody id="sat-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tab: Analytics -->
+      <div id="tab-analytics" class="tab-content">
+        <!-- Altitude History -->
+        <div class="analytics-section">
+          <div class="section-label">Altitude History & Maneuver Detection</div>
+          <div id="altitude-hint" class="analytics-hint">Click a satellite to load history</div>
+          <div id="altitude-chart-container" class="hidden">
+            <canvas id="altitudeChart"></canvas>
+          </div>
+          <div id="maneuver-list"></div>
+        </div>
+
+        <!-- Inter-satellite Spacing -->
+        <div class="analytics-section">
+          <div class="section-label">Inter-satellite Spacing</div>
+          <div id="spacing-container">
+            <canvas id="spacingCanvas" width="300" height="300"></canvas>
+            <div id="spacing-stats"></div>
+          </div>
+        </div>
+
+        <!-- Conjunction Alerts -->
+        <div class="analytics-section">
+          <div class="section-label">Conjunction Alerts (<span id="conj-threshold">10</span> km, 72h)</div>
+          <div id="conjunction-container">
+            <div id="conj-status" class="analytics-hint">Loading...</div>
+            <div id="conj-list"></div>
+          </div>
+        </div>
       </div>
     </div>
 
