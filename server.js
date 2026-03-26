@@ -15,7 +15,15 @@ const LOGIN_URL = `${SPACETRACK_BASE}/ajaxauth/login`;
 const REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 let sessionCookie = null;
-let tleCache = { data: null, fetchedAt: null };
+const tleCache = new Map(); // key → { data, fetchedAt }
+
+// NORAD IDs for known planes — used for prefetching on startup
+const KNOWN_PLANES = {
+  "Plane 1": [65585,65565,65566,65567,65568,65569,65570,65571,65572,65573,
+              65574,65575,65576,65577,65578,65579,65580,65581,65582,65583,65584],
+  "Plane 2": [65974,65975,65976,65977,65978,65979,65980,65981,65982,65983,
+              65984,65985,65986,65987,65988,65989,65990,65991,65992,65993,65994],
+};
 
 async function spaceTrackLogin() {
   const res = await fetch(LOGIN_URL, {
@@ -146,28 +154,24 @@ app.get("/api/tles", async (req, res) => {
       ? req.query.ids.split(",").map((s) => s.trim())
       : null;
 
-    // Use cache if fresh (unless specific IDs requested that differ)
-    const cacheKey = noradIds ? noradIds.sort().join(",") : "__default__";
+    // Use cache if fresh
+    const cacheKey = noradIds ? noradIds.slice().sort().join(",") : "__default__";
     const now = Date.now();
+    const cached = tleCache.get(cacheKey);
 
-    if (
-      tleCache.data &&
-      tleCache.key === cacheKey &&
-      tleCache.fetchedAt &&
-      now - tleCache.fetchedAt < REFRESH_INTERVAL_MS
-    ) {
-      console.log(`[Cache] Serving ${tleCache.data.length} cached TLEs`);
+    if (cached && now - cached.fetchedAt < REFRESH_INTERVAL_MS) {
+      console.log(`[Cache] Serving ${cached.data.length} cached TLEs (key: ${cacheKey.substring(0,30)}...)`);
       return res.json({
-        satellites: tleCache.data,
-        cachedAt: new Date(tleCache.fetchedAt).toISOString(),
+        satellites: cached.data,
+        cachedAt: new Date(cached.fetchedAt).toISOString(),
         source: "cache",
       });
     }
 
-    console.log("[Space-Track] Fetching fresh TLEs...");
+    console.log(`[Space-Track] Fetching fresh TLEs for key: ${cacheKey.substring(0,30)}...`);
     const satellites = await fetchTLEs(noradIds);
 
-    tleCache = { data: satellites, fetchedAt: now, key: cacheKey };
+    tleCache.set(cacheKey, { data: satellites, fetchedAt: now });
     console.log(`[Space-Track] Fetched ${satellites.length} satellites`);
 
     res.json({
@@ -185,7 +189,49 @@ app.get("/api/tles", async (req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Prefetch & background refresh
+// ---------------------------------------------------------------------------
+
+async function prefetchKnownPlanes() {
+  // Fetch all known IDs in one Space-Track call, then populate cache entries
+  // for every useful combination (each plane solo + all planes combined)
+  const allIds = Object.values(KNOWN_PLANES).flat().map(String);
+
+  try {
+    console.log("[Prefetch] Loading known satellite planes from Space-Track...");
+    const allSatellites = await fetchTLEs(allIds);
+    const now = Date.now();
+
+    // Cache the combined key (both planes active)
+    const combinedKey = allIds.slice().sort().join(",");
+    tleCache.set(combinedKey, { data: allSatellites, fetchedAt: now });
+
+    // Cache each individual plane too
+    for (const [planeName, ids] of Object.entries(KNOWN_PLANES)) {
+      const planeIdSet = new Set(ids.map(String));
+      const planeKey = ids.map(String).sort().join(",");
+      const planeSats = allSatellites.filter((s) => {
+        const noradId = s.tle1.substring(2, 7).trim();
+        return planeIdSet.has(noradId);
+      });
+      tleCache.set(planeKey, { data: planeSats, fetchedAt: now });
+      console.log(`[Prefetch] Cached ${planeSats.length} satellites for ${planeName}`);
+    }
+
+    console.log(`[Prefetch] Total: ${allSatellites.length} satellites cached`);
+  } catch (err) {
+    console.error("[Prefetch] Failed:", err.message);
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`\n🛰️  LEO Tracker running at http://localhost:${PORT}`);
   console.log(`   Refresh interval: ${REFRESH_INTERVAL_MS / 60000} minutes\n`);
+
+  // Prefetch on startup so data is ready before the first client connects
+  prefetchKnownPlanes();
+
+  // Background refresh to keep cache warm even if no clients are active
+  setInterval(prefetchKnownPlanes, REFRESH_INTERVAL_MS);
 });
