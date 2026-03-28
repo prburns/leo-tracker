@@ -8,7 +8,7 @@ let satellites = [];        // { name, satrec, entity, orbitEntity, tle1, tle2, 
 let tleRefreshTimer;
 let activePlanes = new Set();
 
-const TLE_REFRESH_MS = 30 * 60 * 1000;
+const TLE_REFRESH_MS = 90 * 60 * 1000; // 90 min (match server-side Space-Track compliance)
 const ORBIT_SAMPLE_POINTS = 120;
 
 // Sort state
@@ -89,13 +89,12 @@ async function init() {
     tab.addEventListener("click", () => switchTab(tab.dataset.tab));
   });
 
-  // Load the first plane by default
-  const firstPlane = Object.keys(SATELLITE_PLANES)[0];
-  if (firstPlane) {
-    activePlanes.add(firstPlane);
-    updatePlaneButtonStates();
-    await loadActivePlanes();
+  // Load all planes by default
+  for (const planeName of Object.keys(SATELLITE_PLANES)) {
+    activePlanes.add(planeName);
   }
+  updatePlaneButtonStates();
+  await loadActivePlanes();
 
   viewer.clock.onTick.addEventListener(updatePositions);
 

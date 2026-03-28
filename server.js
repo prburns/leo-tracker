@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 
 const SPACETRACK_BASE = "https://www.space-track.org";
 const LOGIN_URL = `${SPACETRACK_BASE}/ajaxauth/login`;
-const REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+const REFRESH_INTERVAL_MS = 90 * 60 * 1000; // 90 minutes (Space-Track allows GP queries at most once per hour)
 
 const GM = 398600.4418;    // km^3/s^2
 const R_EARTH = 6371.0;    // km
@@ -107,6 +107,42 @@ async function spaceTrackLogin() {
 // TLE fetching (current)
 // ---------------------------------------------------------------------------
 
+// Fetch only TLEs published in the last hour (Space-Track recommended query).
+// This avoids re-downloading the full GP catalog and complies with the
+// "query GP class at most once per hour" rule.
+// See: https://www.space-track.org/documentation#api-basicSpaceDataGp
+async function fetchRecentTLEs() {
+  if (!sessionCookie) await spaceTrackLogin();
+
+  // Space-Track recommended: fetch all non-decayed TLEs published in the last hour
+  // 0.042 days ≈ 1 hour
+  const queryUrl =
+    `${SPACETRACK_BASE}/basicspacedata/query/class/gp` +
+    `/decay_date/null-val` +
+    `/CREATION_DATE/%3Enow-0.042` +
+    `/format/tle`;
+
+  console.log("[Space-Track] Fetching recently published TLEs (last hour)...");
+
+  const res = await fetch(queryUrl, {
+    headers: { Cookie: sessionCookie },
+  });
+
+  if (res.status === 401) {
+    console.log("[Space-Track] Session expired, re-authenticating...");
+    await spaceTrackLogin();
+    return fetchRecentTLEs();
+  }
+
+  if (!res.ok) {
+    throw new Error(`Space-Track API error: ${res.status} ${res.statusText}`);
+  }
+
+  const raw = await res.text();
+  return parseTLEText(raw);
+}
+
+// Full initial fetch for known NORAD IDs (used only once at startup)
 async function fetchTLEs(noradIds) {
   if (!sessionCookie) await spaceTrackLogin();
 
@@ -402,18 +438,18 @@ app.get("/api/config", (_req, res) => {
   res.json({ cesiumToken: process.env.CESIUM_ION_TOKEN });
 });
 
-// TLE endpoint with optional NORAD ID filter
-app.get("/api/tles", async (req, res) => {
+// TLE endpoint — always serves from cache (GP queries are handled by
+// the scheduled background refresh to comply with Space-Track rate limits)
+app.get("/api/tles", (req, res) => {
   try {
     const noradIds = req.query.ids
       ? req.query.ids.split(",").map((s) => s.trim())
       : null;
 
     const cacheKey = noradIds ? noradIds.slice().sort().join(",") : "__default__";
-    const now = Date.now();
     const cached = tleCache.get(cacheKey);
 
-    if (cached && now - cached.fetchedAt < REFRESH_INTERVAL_MS) {
+    if (cached) {
       console.log(`[Cache] Serving ${cached.data.length} cached TLEs (key: ${cacheKey.substring(0,30)}...)`);
       return res.json({
         satellites: cached.data,
@@ -422,17 +458,25 @@ app.get("/api/tles", async (req, res) => {
       });
     }
 
-    console.log(`[Space-Track] Fetching fresh TLEs for key: ${cacheKey.substring(0,30)}...`);
-    const satellites = await fetchTLEs(noradIds);
+    // If no cache yet (server just started), try the combined cache
+    const allIds = Object.values(KNOWN_PLANES).flat().map(String);
+    const combinedKey = allIds.slice().sort().join(",");
+    const combined = tleCache.get(combinedKey);
 
-    tleCache.set(cacheKey, { data: satellites, fetchedAt: now });
-    console.log(`[Space-Track] Fetched ${satellites.length} satellites`);
+    if (combined && noradIds) {
+      const idSet = new Set(noradIds);
+      const filtered = combined.data.filter((s) => {
+        const nid = s.tle1.substring(2, 7).trim();
+        return idSet.has(nid);
+      });
+      return res.json({
+        satellites: filtered,
+        cachedAt: new Date(combined.fetchedAt).toISOString(),
+        source: "cache",
+      });
+    }
 
-    res.json({
-      satellites,
-      cachedAt: new Date(now).toISOString(),
-      source: "live",
-    });
+    res.json({ satellites: [], cachedAt: null, source: "cache" });
   } catch (err) {
     console.error("[Error]", err.message);
     res.status(500).json({ error: err.message });
@@ -483,31 +527,89 @@ app.get("/api/conjunctions", (_req, res) => {
 // Prefetch & background refresh
 // ---------------------------------------------------------------------------
 
-async function prefetchKnownPlanes() {
+// Build a Set of all known NORAD IDs for quick lookup
+const ALL_KNOWN_IDS = new Set(Object.values(KNOWN_PLANES).flat().map(String));
+
+// Initial full fetch (called once at startup)
+async function initialFetchKnownPlanes() {
   const allIds = Object.values(KNOWN_PLANES).flat().map(String);
 
   try {
-    console.log("[Prefetch] Loading known satellite planes from Space-Track...");
+    console.log("[Prefetch] Initial load of known satellite planes from Space-Track...");
     const allSatellites = await fetchTLEs(allIds);
     const now = Date.now();
 
-    const combinedKey = allIds.slice().sort().join(",");
-    tleCache.set(combinedKey, { data: allSatellites, fetchedAt: now });
-
-    for (const [planeName, ids] of Object.entries(KNOWN_PLANES)) {
-      const planeIdSet = new Set(ids.map(String));
-      const planeKey = ids.map(String).sort().join(",");
-      const planeSats = allSatellites.filter((s) => {
-        const noradId = s.tle1.substring(2, 7).trim();
-        return planeIdSet.has(noradId);
-      });
-      tleCache.set(planeKey, { data: planeSats, fetchedAt: now });
-      console.log(`[Prefetch] Cached ${planeSats.length} satellites for ${planeName}`);
-    }
-
+    updateTLECaches(allSatellites, now);
     console.log(`[Prefetch] Total: ${allSatellites.length} satellites cached`);
   } catch (err) {
-    console.error("[Prefetch] Failed:", err.message);
+    console.error("[Prefetch] Initial load failed:", err.message);
+  }
+}
+
+// Incremental refresh: fetch only recently-published TLEs and merge with cache
+async function refreshKnownPlanes() {
+  try {
+    console.log("[Refresh] Fetching recently published TLEs...");
+    const recentTLEs = await fetchRecentTLEs();
+
+    // Filter to only our known satellites
+    const relevantUpdates = recentTLEs.filter((s) => {
+      const noradId = s.tle1.substring(2, 7).trim();
+      return ALL_KNOWN_IDS.has(noradId);
+    });
+
+    if (relevantUpdates.length === 0) {
+      console.log("[Refresh] No updates for known satellites in last hour");
+      return;
+    }
+
+    console.log(`[Refresh] Found ${relevantUpdates.length} updated TLEs for known satellites`);
+
+    // Merge updates into existing cache
+    const allIds = Object.values(KNOWN_PLANES).flat().map(String);
+    const combinedKey = allIds.slice().sort().join(",");
+    const cached = tleCache.get(combinedKey);
+
+    if (cached) {
+      // Build map of existing TLEs keyed by NORAD ID
+      const tleMap = new Map();
+      for (const s of cached.data) {
+        const noradId = s.tle1.substring(2, 7).trim();
+        tleMap.set(noradId, s);
+      }
+      // Overwrite with updated TLEs
+      for (const s of relevantUpdates) {
+        const noradId = s.tle1.substring(2, 7).trim();
+        tleMap.set(noradId, s);
+      }
+      const merged = Array.from(tleMap.values());
+      const now = Date.now();
+      updateTLECaches(merged, now);
+      console.log(`[Refresh] Cache updated, ${merged.length} satellites total`);
+    } else {
+      // No cache yet—shouldn't happen but handle gracefully
+      const now = Date.now();
+      updateTLECaches(relevantUpdates, now);
+    }
+  } catch (err) {
+    console.error("[Refresh] Failed:", err.message);
+  }
+}
+
+function updateTLECaches(allSatellites, now) {
+  const allIds = Object.values(KNOWN_PLANES).flat().map(String);
+  const combinedKey = allIds.slice().sort().join(",");
+  tleCache.set(combinedKey, { data: allSatellites, fetchedAt: now });
+
+  for (const [planeName, ids] of Object.entries(KNOWN_PLANES)) {
+    const planeIdSet = new Set(ids.map(String));
+    const planeKey = ids.map(String).sort().join(",");
+    const planeSats = allSatellites.filter((s) => {
+      const noradId = s.tle1.substring(2, 7).trim();
+      return planeIdSet.has(noradId);
+    });
+    tleCache.set(planeKey, { data: planeSats, fetchedAt: now });
+    console.log(`[Cache] ${planeSats.length} satellites for ${planeName}`);
   }
 }
 
@@ -515,18 +617,52 @@ async function prefetchKnownPlanes() {
 // Start
 // ---------------------------------------------------------------------------
 
+// Schedule hourly GP refresh offset from busy periods (:00 and :30).
+// Picks the next :19 or :41 past the hour to comply with Space-Track guidelines.
+function scheduleHourlyRefresh() {
+  const now = new Date();
+  const min = now.getMinutes();
+
+  // Target minutes that are 10-20 min off :00 and :30  →  :19 or :41
+  let targetMin;
+  if (min < 19) {
+    targetMin = 19;
+  } else if (min < 41) {
+    targetMin = 41;
+  } else {
+    // Next :19 is in the next hour
+    targetMin = 19;
+  }
+
+  const next = new Date(now);
+  next.setMinutes(targetMin, 0, 0);
+  if (next <= now) {
+    next.setHours(next.getHours() + 1);
+  }
+
+  const delayMs = next - now;
+  console.log(`[Schedule] Next GP refresh at ${next.toISOString()} (in ${Math.round(delayMs / 1000)}s)`);
+
+  setTimeout(() => {
+    refreshKnownPlanes();
+    // After the first offset refresh, repeat every 60 minutes
+    setInterval(refreshKnownPlanes, REFRESH_INTERVAL_MS);
+  }, delayMs);
+}
+
 app.listen(PORT, () => {
   console.log(`\n🛰️  LEO Tracker running at http://localhost:${PORT}`);
-  console.log(`   Refresh interval: ${REFRESH_INTERVAL_MS / 60000} minutes`);
+  console.log(`   GP refresh interval: ${REFRESH_INTERVAL_MS / 60000} minutes (Space-Track compliant)`);
   console.log(`   Conjunction screening: every ${CONJUNCTION_CHECK_INTERVAL_MS / 60000} min, ${CONJUNCTION_LOOKAHEAD_HOURS}h lookahead\n`);
 
   initMailTransporter();
 
-  // Prefetch on startup
-  prefetchKnownPlanes();
-  setInterval(prefetchKnownPlanes, REFRESH_INTERVAL_MS);
+  // Initial full fetch on startup, then schedule hourly incremental refreshes
+  initialFetchKnownPlanes();
+  scheduleHourlyRefresh();
 
   // Run conjunction screening after a short delay (let TLEs load first)
+  // Conjunction screening uses cached TLEs only—no additional GP queries
   setTimeout(() => {
     runConjunctionScreening();
     setInterval(runConjunctionScreening, CONJUNCTION_CHECK_INTERVAL_MS);
