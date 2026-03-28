@@ -89,13 +89,12 @@ async function init() {
     tab.addEventListener("click", () => switchTab(tab.dataset.tab));
   });
 
-  // Load the first plane by default
-  const firstPlane = Object.keys(SATELLITE_PLANES)[0];
-  if (firstPlane) {
-    activePlanes.add(firstPlane);
-    updatePlaneButtonStates();
-    await loadActivePlanes();
+  // Load all planes by default
+  for (const planeName of Object.keys(SATELLITE_PLANES)) {
+    activePlanes.add(planeName);
   }
+  updatePlaneButtonStates();
+  await loadActivePlanes();
 
   viewer.clock.onTick.addEventListener(updatePositions);
 
