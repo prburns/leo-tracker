@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 
 const SPACETRACK_BASE = "https://www.space-track.org";
 const LOGIN_URL = `${SPACETRACK_BASE}/ajaxauth/login`;
-const REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 60 minutes (Space-Track allows GP queries at most once per hour)
+const REFRESH_INTERVAL_MS = 90 * 60 * 1000; // 90 minutes (Space-Track allows GP queries at most once per hour)
 
 const GM = 398600.4418;    // km^3/s^2
 const R_EARTH = 6371.0;    // km

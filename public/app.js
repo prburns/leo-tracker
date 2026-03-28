@@ -8,7 +8,7 @@ let satellites = [];        // { name, satrec, entity, orbitEntity, tle1, tle2, 
 let tleRefreshTimer;
 let activePlanes = new Set();
 
-const TLE_REFRESH_MS = 60 * 60 * 1000; // 60 min (match server-side Space-Track compliance)
+const TLE_REFRESH_MS = 90 * 60 * 1000; // 90 min (match server-side Space-Track compliance)
 const ORBIT_SAMPLE_POINTS = 120;
 
 // Sort state
