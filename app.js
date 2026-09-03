@@ -40,6 +40,80 @@ const SATELLITE_PLANES = {
 const planeColors = {};
 
 // ---------------------------------------------------------------------------
+// WebGL / shader compatibility
+// ---------------------------------------------------------------------------
+
+// Cesium's sky atmosphere vertex shader hands varyings straight to the `out`
+// parameters of computeAtmosphereScattering(). ANGLE's Metal backend (Safari,
+// and Chrome on macOS) cannot translate that, so the program never links:
+//
+//   RuntimeError: Program failed to link. ... MSL compilation error:
+//   reference to type 'thread float3' could not bind to an lvalue of type
+//   '__metal_generic float3'
+//
+// The failure kills the render loop, so the globe never appears even though the
+// rest of the page works. The per-fragment path computes scattering into local
+// variables instead, which translates cleanly, and it looks better besides. The
+// shader is unchanged as of Cesium 1.145, so upgrading is not a fix.
+function configureAtmosphereCompatibility(viewer) {
+  const skyAtmosphere = viewer.scene.skyAtmosphere;
+  if (skyAtmosphere) {
+    skyAtmosphere.perFragmentAtmosphere = true;
+  }
+}
+
+// The globe's ground atmosphere has the same shader pattern, but Cesium only
+// picks its per-vertex variant once the camera is inside nightFadeOutDistance,
+// so it can fail later, on zoom-in. Rather than turn effects off pre-emptively
+// for everyone, drop them one at a time if a shader actually fails to build.
+function installRenderErrorRecovery(viewer) {
+  const scene = viewer.scene;
+
+  const fallbacks = [
+    {
+      label: "ground atmosphere",
+      pending: () => scene.globe && scene.globe.showGroundAtmosphere,
+      apply: () => {
+        scene.globe.showGroundAtmosphere = false;
+      },
+    },
+    {
+      label: "sky atmosphere",
+      pending: () => scene.skyAtmosphere && scene.skyAtmosphere.show,
+      apply: () => {
+        scene.skyAtmosphere.show = false;
+      },
+    },
+  ];
+
+  scene.renderError.addEventListener((_scene, error) => {
+    const message = (error && error.message) || String(error);
+    const isShaderError = /failed to (link|compile)|shader/i.test(message);
+    const next = isShaderError ? fallbacks.find((f) => f.pending()) : undefined;
+
+    if (!next) {
+      console.error("[Cesium render error]", error);
+      showGlobeError(message);
+      return;
+    }
+
+    console.warn(`[Cesium] Shader failed to build; disabling ${next.label}.`, error);
+    next.apply();
+    viewer.useDefaultRenderLoop = true; // Cesium halts the loop on render errors
+  });
+}
+
+function showGlobeError(message) {
+  const container = document.getElementById("cesiumContainer");
+  if (!container || container.querySelector(".globe-error")) return;
+
+  const panel = document.createElement("div");
+  panel.className = "globe-error";
+  panel.textContent = `The 3D globe could not be rendered by this browser: ${message}`;
+  container.appendChild(panel);
+}
+
+// ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
 
@@ -59,7 +133,13 @@ async function init() {
     fullscreenButton: false,
     selectionIndicator: true,
     infoBox: false,
+    // Cesium's built-in error panel stops the render loop for good; recovery is
+    // handled by installRenderErrorRecovery() below.
+    showRenderLoopErrors: false,
   });
+
+  configureAtmosphereCompatibility(viewer);
+  installRenderErrorRecovery(viewer);
 
   viewer.camera.setView({
     destination: Cesium.Cartesian3.fromDegrees(-77.0, 38.9, 12_000_000),
